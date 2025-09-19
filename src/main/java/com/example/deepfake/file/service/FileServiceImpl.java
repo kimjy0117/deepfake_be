@@ -1,5 +1,7 @@
 package com.example.deepfake.file.service;
 
+import com.cloudinary.Cloudinary;
+import java.util.HashMap;
 import com.example.deepfake.file.dto.FileUpdateRequest;
 import com.example.deepfake.file.dto.FileDetailResponse;
 import com.example.deepfake.file.dto.FileItemDto;
@@ -19,12 +21,9 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @Service
@@ -35,23 +34,18 @@ public class FileServiceImpl implements FileService {
     
     private final FileRepository fileRepository;
     private final UserRepository userRepository;
+    private final Cloudinary cloudinary;
     
-    @Value("${file.upload.dir}")
-    private String uploadDir;
-    
-    @Value("${file.base.url}")
-    private String baseUrl;
+    @Value("${cloudinary.folder:deepfake}")
+    private String cloudinaryFolder;
     
     @Override
     public List<FileItemDto> uploadFiles(List<MultipartFile> files, List<String> titles, Long userId) {
-        log.info("파일 업로드 시작: 사용자 {}, 파일 개수 {}", userId, files.size());
+        log.info("파일 업로드 시작 (Cloudinary): 사용자 {}, 파일 개수 {}", userId, files.size());
         
         // 사용자 조회
         User user = userRepository.findById(userId)
             .orElseThrow(() -> new RuntimeException("사용자를 찾을 수 없습니다: " + userId));
-        
-        // 업로드 디렉토리 생성
-        createUploadDirectory();
         
         List<FileItemDto> uploadedFiles = new ArrayList<>();
         
@@ -60,32 +54,20 @@ public class FileServiceImpl implements FileService {
             String title = (titles != null && i < titles.size()) ? titles.get(i) : file.getOriginalFilename();
             
             try {
-                FileItemDto uploadedFile = uploadSingleFile(file, title, user);
+                FileItemDto uploadedFile = uploadSingleFileToCloudinary(file, title, user);
                 uploadedFiles.add(uploadedFile);
-                log.info("파일 업로드 성공: {}", uploadedFile.getName());
+                log.info("Cloudinary 업로드 성공: {}", uploadedFile.getName());
             } catch (Exception e) {
-                log.error("파일 업로드 실패: {}", file.getOriginalFilename(), e);
+                log.error("Cloudinary 업로드 실패: {}", file.getOriginalFilename(), e);
                 throw new RuntimeException("파일 업로드 중 오류가 발생했습니다: " + file.getOriginalFilename(), e);
             }
         }
         
-        log.info("파일 업로드 완료: {} 개 파일", uploadedFiles.size());
+        log.info("Cloudinary 파일 업로드 완료: {} 개 파일", uploadedFiles.size());
         return uploadedFiles;
     }
     
-    private void createUploadDirectory() {
-        try {
-            Path uploadPath = Paths.get(uploadDir);
-            if (!Files.exists(uploadPath)) {
-                Files.createDirectories(uploadPath);
-                log.info("업로드 디렉토리 생성: {}", uploadPath.toAbsolutePath());
-            }
-        } catch (IOException e) {
-            throw new RuntimeException("업로드 디렉토리 생성 실패", e);
-        }
-    }
-    
-    private FileItemDto uploadSingleFile(MultipartFile file, String title, User user) throws IOException {
+    private FileItemDto uploadSingleFileToCloudinary(MultipartFile file, String title, User user) throws IOException {
         // 파일 검증
         if (file.isEmpty()) {
             throw new RuntimeException("빈 파일입니다");
@@ -93,57 +75,76 @@ public class FileServiceImpl implements FileService {
         
         // 고유한 파일명 생성
         String originalFilename = file.getOriginalFilename();
-        String extension = getFileExtension(originalFilename);
-        String uniqueFileName = UUID.randomUUID().toString() + extension;
+        String uniqueFileName = UUID.randomUUID().toString();
         
         // 파일 타입 결정
         File.FileType fileType = determineFileType(file.getContentType());
         
-        // 파일 저장
-        Path filePath = Paths.get(uploadDir, uniqueFileName);
-        Files.copy(file.getInputStream(), filePath, StandardCopyOption.REPLACE_EXISTING);
-        
-        // 파일 엔티티 생성 및 저장 (URL은 나중에 설정)
-        File fileEntity = File.builder()
-            .name(uniqueFileName)
-            .title(title)
-            .originalName(originalFilename)
-            .url("") // 임시로 빈 문자열
-            .size(file.getSize())
-            .type(fileType)
-            .mimeType(file.getContentType())
-            .user(user)
-            .build();
-        
-        File savedFile = fileRepository.save(fileEntity);
-        
-        // 파일 ID 기반 URL 생성 및 업데이트
-        String fileUrl = baseUrl + "/files/" + savedFile.getId() + "/stream";
-        savedFile.setUrl(fileUrl);
-        savedFile = fileRepository.save(savedFile);
-        
-        // DTO 변환
-        return FileItemDto.builder()
-            .id(savedFile.getId())
-            .name(savedFile.getName())
-            .title(savedFile.getTitle())
-            .originalName(savedFile.getOriginalName())
-            .url(savedFile.getUrl())
-            .thumbnailUrl(savedFile.getThumbnailUrl())
-            .size(savedFile.getSize())
-            .type(savedFile.getType())
-            .mimeType(savedFile.getMimeType())
-            .userId(savedFile.getUser().getId())
-            .uploadedAt(savedFile.getUploadedAt())
-            .build();
+        try {
+            // Cloudinary 업로드 옵션 설정
+            Map<String, Object> uploadParams = new HashMap<>();
+            uploadParams.put("folder", cloudinaryFolder);
+            uploadParams.put("public_id", uniqueFileName);
+            uploadParams.put("resource_type", fileType == File.FileType.VIDEO ? "video" : "image");
+            
+            // 이미지인 경우 최적화 옵션 추가
+            if (fileType == File.FileType.IMAGE) {
+                uploadParams.put("transformation", "c_limit,w_1920,h_1080,q_auto");
+            }
+            
+            // Cloudinary에 업로드
+            Map uploadResult = cloudinary.uploader().upload(file.getBytes(), uploadParams);
+            
+            String cloudinaryUrl = (String) uploadResult.get("secure_url");
+            String publicId = (String) uploadResult.get("public_id");
+            
+            log.info("Cloudinary 업로드 완료: {} -> {}", originalFilename, cloudinaryUrl);
+            
+            // 썸네일 URL 생성 (이미지만)
+            String thumbnailUrl = null;
+            if (fileType == File.FileType.IMAGE) {
+                String baseUrl = cloudinaryUrl.substring(0, cloudinaryUrl.lastIndexOf('/') + 1);
+                thumbnailUrl = baseUrl + "c_fill,w_300,h_200,q_auto/" + publicId;
+            }
+            
+            // 파일 엔티티 생성 및 저장
+            File fileEntity = File.builder()
+                .name(publicId)
+                .title(title)
+                .originalName(originalFilename)
+                .url(cloudinaryUrl)
+                .thumbnailUrl(thumbnailUrl)
+                .size(file.getSize())
+                .type(fileType)
+                .mimeType(file.getContentType())
+                .user(user)
+                .build();
+            
+            File savedFile = fileRepository.save(fileEntity);
+            
+            log.info("파일 엔티티 저장 완료: ID {}", savedFile.getId());
+            
+            // DTO 변환
+            return FileItemDto.builder()
+                .id(savedFile.getId())
+                .name(savedFile.getName())
+                .title(savedFile.getTitle())
+                .originalName(savedFile.getOriginalName())
+                .url(savedFile.getUrl())
+                .thumbnailUrl(savedFile.getThumbnailUrl())
+                .size(savedFile.getSize())
+                .type(savedFile.getType())
+                .mimeType(savedFile.getMimeType())
+                .userId(savedFile.getUser().getId())
+                .uploadedAt(savedFile.getUploadedAt())
+                .build();
+                
+        } catch (Exception e) {
+            log.error("Cloudinary 업로드 중 오류 발생: {}", originalFilename, e);
+            throw new RuntimeException("Cloudinary 업로드 실패: " + e.getMessage(), e);
+        }
     }
     
-    private String getFileExtension(String filename) {
-        if (filename == null || !filename.contains(".")) {
-            return "";
-        }
-        return filename.substring(filename.lastIndexOf("."));
-    }
     
     private File.FileType determineFileType(String mimeType) {
         if (mimeType == null) {
@@ -160,15 +161,13 @@ public class FileServiceImpl implements FileService {
     }
     
     private FileItemDto convertToFileItemDto(File file) {
-        // ID 기반 URL 생성
-        String fileUrl = baseUrl + "/files/" + file.getId() + "/stream";
-        
+        // Cloudinary URL 직접 사용
         return FileItemDto.builder()
             .id(file.getId())
             .name(file.getName())
             .title(file.getTitle())
             .originalName(file.getOriginalName())
-            .url(fileUrl)
+            .url(file.getUrl()) // Cloudinary URL 직접 사용
             .thumbnailUrl(file.getThumbnailUrl())
             .size(file.getSize())
             .type(file.getType())
@@ -179,15 +178,13 @@ public class FileServiceImpl implements FileService {
     }
     
     private PublicFileItemDto convertToPublicFileItemDto(File file) {
-        // ID 기반 URL 생성
-        String fileUrl = baseUrl + "/files/" + file.getId() + "/stream";
-        
+        // Cloudinary URL 직접 사용
         return PublicFileItemDto.publicBuilder()
             .id(file.getId())
             .name(file.getName())
             .title(file.getTitle())
             .originalName(file.getOriginalName())
-            .url(fileUrl)
+            .url(file.getUrl()) // Cloudinary URL 직접 사용
             .thumbnailUrl(file.getThumbnailUrl())
             .size(file.getSize())
             .type(file.getType())
@@ -330,16 +327,13 @@ public class FileServiceImpl implements FileService {
         File file = fileRepository.findById(fileId)
             .orElseThrow(() -> new RuntimeException("파일을 찾을 수 없습니다: " + fileId));
         
-        // ID 기반 URL 생성
-        String fileUrl = baseUrl + "/files/" + file.getId() + "/stream";
-        
-        // PublicFileItemDto 생성
+        // PublicFileItemDto 생성 (Cloudinary URL 직접 사용)
         PublicFileItemDto fileData = PublicFileItemDto.publicBuilder()
             .id(file.getId())
             .name(file.getName())
             .title(file.getTitle())
             .originalName(file.getOriginalName())
-            .url(fileUrl)
+            .url(file.getUrl()) // Cloudinary URL 직접 사용
             .thumbnailUrl(file.getThumbnailUrl())
             .size(file.getSize())
             .type(file.getType())
@@ -367,15 +361,15 @@ public class FileServiceImpl implements FileService {
             throw new RuntimeException("파일 삭제 권한이 없습니다");
         }
         
-        // 실제 파일 삭제
+        // Cloudinary에서 파일 삭제
         try {
-            Path filePath = Paths.get(uploadDir, file.getName());
-            if (Files.exists(filePath)) {
-                Files.delete(filePath);
-                log.info("파일 삭제 완료: {}", filePath);
-            }
-        } catch (IOException e) {
-            log.error("파일 삭제 실패: {}", file.getName(), e);
+            String publicId = file.getName(); // public_id로 저장되어 있음
+            String resourceType = file.getType() == File.FileType.VIDEO ? "video" : "image";
+            
+            Map deleteResult = cloudinary.uploader().destroy(publicId, Map.of("resource_type", resourceType));
+            log.info("Cloudinary에서 파일 삭제 완료: {}, 결과: {}", publicId, deleteResult.get("result"));
+        } catch (Exception e) {
+            log.error("Cloudinary에서 파일 삭제 실패: {}", file.getName(), e);
             // 파일 삭제 실패해도 DB에서는 제거
         }
         
@@ -410,83 +404,23 @@ public class FileServiceImpl implements FileService {
     @Override
     @Transactional(readOnly = true)
     public byte[] downloadFile(Long fileId) {
-        log.info("파일 다운로드: {}", fileId);
-        
+        // Cloudinary 사용시 직접 URL 제공 - 이 메서드는 더이상 사용되지 않습니다.
         File file = fileRepository.findById(fileId)
             .orElseThrow(() -> new RuntimeException("파일을 찾을 수 없습니다: " + fileId));
         
-        try {
-            Path filePath = Paths.get(uploadDir, file.getName());
-            if (!Files.exists(filePath)) {
-                throw new RuntimeException("파일이 존재하지 않습니다: " + file.getName());
-            }
-            
-            return Files.readAllBytes(filePath);
-        } catch (IOException e) {
-            log.error("파일 읽기 실패: {}", file.getName(), e);
-            throw new RuntimeException("파일 읽기 중 오류가 발생했습니다", e);
-        }
+        log.warn("downloadFile() 메서드는 Cloudinary 사용으로 deprecated됩니다. 직접 URL을 사용하세요: {}", file.getUrl());
+        throw new RuntimeException("Cloudinary 사용으로 인해 파일은 직접 URL을 통해 접근 가능합니다. URL: " + file.getUrl());
     }
     
     @Override
     @Transactional(readOnly = true)
     public byte[] streamFile(Long fileId, String range) {
-        log.info("파일 스트리밍: {}, Range: {}", fileId, range);
-        
+        // Cloudinary 사용시 직접 URL 제공 - 이 메서드는 더이상 사용되지 않습니다.
         File file = fileRepository.findById(fileId)
             .orElseThrow(() -> new RuntimeException("파일을 찾을 수 없습니다: " + fileId));
         
-        try {
-            Path filePath = Paths.get(uploadDir, file.getName());
-            if (!Files.exists(filePath)) {
-                throw new RuntimeException("파일이 존재하지 않습니다: " + file.getName());
-            }
-            
-            long fileSize = Files.size(filePath);
-            
-            // Range 요청이 없으면 전체 파일 반환 (작은 파일의 경우)
-            if (range == null || fileSize < 1024 * 1024) { // 1MB 미만
-                return Files.readAllBytes(filePath);
-            }
-            
-            // Range 요청 파싱 (예: "bytes=0-1023")
-            if (range.startsWith("bytes=")) {
-                String[] ranges = range.substring(6).split("-");
-                long start = 0;
-                long end = fileSize - 1;
-                
-                if (ranges.length > 0 && !ranges[0].isEmpty()) {
-                    start = Long.parseLong(ranges[0]);
-                }
-                if (ranges.length > 1 && !ranges[1].isEmpty()) {
-                    end = Long.parseLong(ranges[1]);
-                }
-                
-                // 범위 검증
-                start = Math.max(0, start);
-                end = Math.min(fileSize - 1, end);
-                
-                if (start <= end) {
-                    int length = (int) (end - start + 1);
-                    byte[] buffer = new byte[length];
-                    
-                    try (var channel = Files.newByteChannel(filePath)) {
-                        channel.position(start);
-                        var byteBuffer = java.nio.ByteBuffer.wrap(buffer);
-                        channel.read(byteBuffer);
-                    }
-                    
-                    return buffer;
-                }
-            }
-            
-            // 기본적으로 전체 파일 반환
-            return Files.readAllBytes(filePath);
-            
-        } catch (IOException e) {
-            log.error("파일 스트리밍 실패: {}", file.getName(), e);
-            throw new RuntimeException("파일 스트리밍 중 오류가 발생했습니다", e);
-        }
+        log.warn("streamFile() 메서드는 Cloudinary 사용으로 deprecated됩니다. 직접 URL을 사용하세요: {}", file.getUrl());
+        throw new RuntimeException("Cloudinary 사용으로 인해 파일은 직접 URL을 통해 접근 가능합니다. URL: " + file.getUrl());
     }
     
     @Override

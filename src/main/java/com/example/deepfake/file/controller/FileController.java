@@ -27,6 +27,7 @@ import com.example.deepfake.auth.service.JwtService;
 
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -199,92 +200,35 @@ public class FileController {
     }
     
     @GetMapping("/{fileId}/stream")
-    @Operation(summary = "파일 스트리밍", description = "이미지나 영상 파일을 스트리밍으로 제공합니다")
-    public ResponseEntity<byte[]> streamFile(
-            @Parameter(description = "파일 ID") @PathVariable("fileId") Long fileId,
-            @RequestHeader(value = "Range", required = false) String range) {
-        log.info("파일 스트리밍 요청: {}, Range: {}", fileId, range);
+    @Operation(summary = "파일 스트리밍 (Redirect to Cloudinary)", description = "Cloudinary URL로 리디렉션합니다")
+    public ResponseEntity<Void> streamFile(
+            @Parameter(description = "파일 ID") @PathVariable("fileId") Long fileId) {
+        log.info("파일 스트리밍 요청 (Cloudinary 리디렉션): {}", fileId);
         
         try {
-            byte[] fileData = fileService.streamFile(fileId, range);
-            String mimeType = fileService.getFileMimeType(fileId);
-            long fileSize = fileService.getFileSize(fileId);
+            // 파일 상세 정보 조회
+            FileDetailResponse fileDetail = fileService.getFileDetail(fileId);
+            String cloudinaryUrl = fileDetail.getData().getUrl();
             
-            HttpHeaders headers = new HttpHeaders();
-            headers.set("Accept-Ranges", "bytes");
-            headers.set("Cache-Control", "public, max-age=3600");
+            log.info("Cloudinary URL로 리디렉션: {} -> {}", fileId, cloudinaryUrl);
             
-            // MIME 타입 설정
-            MediaType mediaType;
-            if (mimeType != null) {
-                try {
-                    mediaType = MediaType.parseMediaType(mimeType);
-                } catch (Exception e) {
-                    log.warn("Invalid MIME type: {}, using default", mimeType);
-                    mediaType = MediaType.APPLICATION_OCTET_STREAM;
-                }
-            } else {
-                mediaType = MediaType.APPLICATION_OCTET_STREAM;
-            }
-            
-            if (range != null && range.startsWith("bytes=")) {
-                // Range 요청 파싱
-                String[] ranges = range.substring(6).split("-");
-                long start = 0;
-                long end = fileSize - 1;
-                
-                if (ranges.length > 0 && !ranges[0].isEmpty()) {
-                    start = Long.parseLong(ranges[0]);
-                }
-                if (ranges.length > 1 && !ranges[1].isEmpty()) {
-                    end = Long.parseLong(ranges[1]);
-                }
-                
-                // 실제 반환된 데이터 크기 계산
-                end = Math.min(end, start + fileData.length - 1);
-                
-                headers.set("Content-Range", String.format("bytes %d-%d/%d", start, end, fileSize));
-                headers.set("Content-Length", String.valueOf(fileData.length));
-                
-                return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
-                        .headers(headers)
-                        .contentType(mediaType)
-                        .body(fileData);
-            } else {
-                headers.set("Content-Length", String.valueOf(fileData.length));
-                return ResponseEntity.ok()
-                        .headers(headers)
-                        .contentType(mediaType)
-                        .body(fileData);
-            }
+            // Cloudinary URL로 리디렉션
+            return ResponseEntity.status(HttpStatus.MOVED_PERMANENTLY)
+                    .location(URI.create(cloudinaryUrl))
+                    .build();
+                    
         } catch (Exception e) {
-            log.error("파일 스트리밍 중 오류 발생: {}", fileId, e);
-            return ResponseEntity.internalServerError().build();
+            log.error("파일 리디렉션 중 오류 발생: {}", fileId, e);
+            return ResponseEntity.notFound().build();
         }
     }
     
     @GetMapping("/serve/{fileName}")
-    @Operation(summary = "파일 서빙", description = "업로드된 파일을 직접 서빙합니다")
-    public ResponseEntity<byte[]> serveFile(@PathVariable("fileName") String fileName) {
-        try {
-            Path filePath = Paths.get("./uploads", fileName);
-            if (!Files.exists(filePath)) {
-                return ResponseEntity.notFound().build();
-            }
-            
-            byte[] fileData = Files.readAllBytes(filePath);
-            String contentType = Files.probeContentType(filePath);
-            
-            if (contentType == null) {
-                contentType = "application/octet-stream";
-            }
-            
-            return ResponseEntity.ok()
-                    .contentType(MediaType.parseMediaType(contentType))
-                    .body(fileData);
-        } catch (IOException e) {
-            log.error("파일 서빙 중 오류 발생: {}", fileName, e);
-            return ResponseEntity.internalServerError().build();
-        }
+    @Operation(summary = "파일 서빙 (Deprecated)", description = "이 기능은 더 이상 지원되지 않습니다. Cloudinary URL을 직접 사용하세요.")
+    @Deprecated
+    public ResponseEntity<String> serveFile(@PathVariable("fileName") String fileName) {
+        log.warn("serveFile() 메서드는 deprecated되었습니다. Cloudinary URL을 직접 사용하세요: {}", fileName);
+        return ResponseEntity.status(HttpStatus.GONE)
+                .body("이 기능은 더 이상 지원되지 않습니다. 파일 상세 API를 통해 Cloudinary URL을 조회하여 직접 접근하세요.");
     }
 }
