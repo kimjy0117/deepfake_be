@@ -83,7 +83,8 @@ public class SecurityConfig {
             "http://localhost:3000",
             "http://localhost:5173", 
             "http://192.168.3.115:5173",
-            "http://127.0.0.1:5173"
+            "http://127.0.0.1:5173",
+            "https://deeepfake.netlify.app"
         ));
         configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"));
         configuration.setAllowedHeaders(Arrays.asList("*"));
