@@ -89,7 +89,11 @@ public class FileServiceImpl implements FileService {
             
             // 이미지인 경우 최적화 옵션 추가
             if (fileType == File.FileType.IMAGE) {
-                uploadParams.put("transformation", "c_limit,w_1920,h_1080,q_auto");
+                // 원본 크기 그대로 업로드 (품질만 최적화)
+                uploadParams.put("quality", "auto");
+                
+                // 리사이즈하려면 아래 줄의 주석을 해제:
+                // uploadParams.put("transformation", "c_limit,w_1920,h_1080,q_auto");
             }
             
             // Cloudinary에 업로드
